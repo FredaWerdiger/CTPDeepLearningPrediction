@@ -1,5 +1,6 @@
 import sys
 from fns import *
+
 sys.path.append('../DenseNetFCN3D-pytorch')
 from densenet import *
 
@@ -53,8 +54,36 @@ from sklearn.model_selection import train_test_split
 from sklearn.cluster import KMeans
 import torch
 
+'''
+Input features
 
-def main(data_dir, notes=''):
+data_dir = location of the data. 
+
+Data should be organised as folders
+"images", "nccts" and "labels" for stacked CTP maps, contrast free CT and segmentation, respectively.
+
+features = list of features to include in the model.
+Features should be in this order: 'DT', 'CBF', 'CBV', 'MTT', 'ncct'.
+e.g. ['DT', 'NCCT'] or ['CBF', 'MTT', 'NCCT']
+
+out_tag = tag for the folder that will hold results. If left empty (out_tag='') the folder will be called "out"
+
+notes = anything you want to add to the results print out.
+
+'''
+
+
+def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, notes=''):
+    # DEFAULT PARAMETERS
+    if features is None:
+        features = ['DT', 'CBF', 'CBV', 'ncct']
+    else:
+        features = list(features)
+    if image_size is None:
+        image_size = 128
+    image_size = [image_size]
+    if max_epochs is None:
+        max_epochs = 400
 
     image_paths = glob.glob(os.path.join(data_dir, 'images', '*'))
     image_paths.sort()
@@ -62,6 +91,10 @@ def main(data_dir, notes=''):
     mask_paths.sort()
     ncct_paths = glob.glob(os.path.join(data_dir, 'ncct', '*'))
     ncct_paths.sort()
+
+    # ENSURE DATA IS THERE
+    assert image_paths is not None
+    assert len(image_paths) == len(mask_paths) == len(ncct_paths)
 
     # CREATE LABEL AND DATAFRAME
     dl_id = [str(num) for num in np.arange(len(image_paths))]
@@ -78,7 +111,7 @@ def main(data_dir, notes=''):
     for path in mask_paths:
         im = sitk.ReadImage(path)
         x, y, z = im.GetSpacing()
-        voxel_size = (x * y * z)/1000
+        voxel_size = (x * y * z) / 1000
         label = sitk.LabelShapeStatisticsImageFilter()
         label.Execute(sitk.Cast(im, sitk.sitkUInt8))
         size = label.GetNumberOfPixels(1)
@@ -94,7 +127,7 @@ def main(data_dir, notes=''):
 
     train_id, test_id = train_test_split(dl_id,
                                          train_size=num_train,
-                                         test_size=num_test+num_validation,
+                                         test_size=num_test + num_validation,
                                          random_state=random_state,
                                          shuffle=True,
                                          stratify=labels)
@@ -111,7 +144,7 @@ def main(data_dir, notes=''):
                                               shuffle=True,
                                               stratify=test_labels)
 
-    # HOME MANY TRAINING FILES ARE MANUALLY SEGMENTED
+    # GET THE NUMBER OF SMALL LESIONS IN EACH GROUP
     train_df = df[df.apply(lambda x: x.dl_id in train_id, axis=1)]
     num_small_train = len(train_df[train_df.apply(lambda x: x.size_labels == 1, axis=1)])
 
@@ -121,15 +154,15 @@ def main(data_dir, notes=''):
     test_df = df[df.apply(lambda x: x.dl_id in test_id, axis=1)]
     num_small_test = len(test_df[test_df.apply(lambda x: x.size_labels == 1, axis=1)])
 
-
     def make_dict(id):
         id = [str(num).zfill(3) for num in id]
         paths1 = [file for file in image_paths
-                             if file.split('.nii.gz')[0].split('_')[-1] in id]
+                  if file.split('.nii.gz')[0].split('_')[-1] in id]
         paths2 = [file for file in ncct_paths if file.split('.nii.gz')[0].split('_')[-1] in id]
         paths3 = [file for file in mask_paths if file.split('.nii.gz')[0].split('_')[-1] in id]
 
-        files_dict = [{"image": image_name, "ncct": ncct_name, "label": label_name} for image_name, ncct_name, label_name in zip(paths1, paths2, paths3)]
+        files_dict = [{"image": image_name, "ncct": ncct_name, "label": label_name} for
+                      image_name, ncct_name, label_name in zip(paths1, paths2, paths3)]
 
         return files_dict
 
@@ -137,20 +170,10 @@ def main(data_dir, notes=''):
     val_files = make_dict(validation_id)
     test_files = make_dict(test_id)
 
-    # model parameters
-    max_epochs = 400
-    image_size = [128]
-    # feature order = ['DT', 'CBF', 'CBV', 'MTT', 'ncct', 'ncct_atrophy']
-    features = ['DT', 'CBF', 'CBV', 'ncct']
     features_transform = ['image_' + string for string in [feature for feature in features
-                                                           if "ncct" not in feature and "atrophy" not in feature]]
+                                                           if "ncct" not in feature]]
     if 'ncct' in features:
         features_transform += ['ncct_raw']
-    if 'atrophy' in features:
-        features_transform += ['ncct_atrophy']
-        atrophy = True
-    else:
-        atrophy = False
     features_string = ''
     for feature in features:
         features_string += '_'
@@ -158,19 +181,17 @@ def main(data_dir, notes=''):
     patch_size = None
     batch_size = 2
     val_interval = 2
-    out_tag = 'best_model/stratify_size/att_unet_3_layers/without_atrophy/complete_occlusions/more_data_with_exclusions602020split/hemisphere'
 
     print(f"out_tag = {out_tag}")
 
-    if not os.path.exists(directory + 'out_' + out_tag):
-        os.makedirs(directory + 'out_' + out_tag)
+    if not os.path.exists(data_dir + 'out_' + out_tag):
+        os.makedirs(data_dir + 'out_' + out_tag)
 
     set_determinism(seed=42)
 
-    transform_dir = os.path.join(directory, 'train', 'ncct_trans')
+    transform_dir = os.path.join(data_dir, 'train', 'ncct_trans')
     if not os.path.exists(transform_dir):
         os.makedirs(transform_dir)
-
 
     train_transforms = Compose(
         [
@@ -179,7 +200,7 @@ def main(data_dir, notes=''):
             Resized(keys=["image", "ncct", "label"],
                     mode=['trilinear', 'trilinear', "nearest"],
                     align_corners=[True, True, None],
-                    spatial_size=image_size*3),
+                    spatial_size=image_size * 3),
             SplitDimd(keys="image", dim=0, keepdim=True,
                       output_postfixes=['DT', 'CBF', 'CBV', 'MTT']),
             RepeatChannelD(keys="ncct", repeats=2),
@@ -207,7 +228,7 @@ def main(data_dir, notes=''):
             Resized(keys=["image", "ncct", "label"],
                     mode=['trilinear', 'trilinear', "nearest"],
                     align_corners=[True, True, None],
-                    spatial_size=image_size*3),
+                    spatial_size=image_size * 3),
             SplitDimd(keys="image", dim=0, keepdim=True,
                       output_postfixes=["DT", "CBF", "CBV", "MTT"]),
             RepeatChannelD(keys="ncct", repeats=2),
@@ -229,7 +250,7 @@ def main(data_dir, notes=''):
             Resized(keys=["image", "ncct"],
                     mode=['trilinear', 'trilinear'],
                     align_corners=[True, True],
-                    spatial_size=image_size*3),
+                    spatial_size=image_size * 3),
             SplitDimd(keys="image", dim=0, keepdim=True,
                       output_postfixes=['DT', 'CBF', 'CBV', 'MTT']),
             RepeatChannelD(keys="ncct", repeats=2),
@@ -245,16 +266,16 @@ def main(data_dir, notes=''):
     )
 
     train_dataset = CacheDataset(
-      data=train_files,
-       transform=train_transforms,
-       cache_rate=1.0,
-       num_workers=8)
+        data=train_files,
+        transform=train_transforms,
+        cache_rate=1.0,
+        num_workers=8)
 
     val_dataset = CacheDataset(
-       data=val_files,
-       transform=val_transforms,
-       cache_rate=1.0,
-       num_workers=8)
+        data=val_files,
+        transform=val_transforms,
+        cache_rate=1.0,
+        num_workers=8)
 
     test_ds = CacheDataset(
         data=test_files,
@@ -264,13 +285,13 @@ def main(data_dir, notes=''):
     )
 
     train_loader = DataLoader(train_dataset,
-                             batch_size=batch_size,
-                             shuffle=True,
-                             pin_memory=True)
+                              batch_size=batch_size,
+                              shuffle=True,
+                              pin_memory=True)
 
     val_loader = DataLoader(val_dataset,
-                           batch_size=batch_size,
-                           pin_memory=True)
+                            batch_size=batch_size,
+                            pin_memory=True)
 
     test_loader = DataLoader(test_ds,
                              batch_size=1,
@@ -298,25 +319,6 @@ def main(data_dir, notes=''):
     device = 'cuda'
     channels = (16, 32, 64)
 
-    model = UNet(
-        spatial_dims=3,
-        in_channels=ch_in,
-        out_channels=2,
-        channels=channels,
-        strides=(2, 2, 2),
-        num_res_units=2,
-        norm=Norm.BATCH,
-        dropout=0.2
-    )
-    model = DenseNetFCN(
-        ch_in=ch_in,
-        ch_out_init=36,
-        num_classes=2,
-        growth_rate=12,
-        layers=(4, 4, 4, 4, 4),
-        bottleneck=True,
-        bottleneck_layer=4
-    )
     model = AttentionUnet(
         spatial_dims=3,
         in_channels=ch_in,
@@ -354,7 +356,6 @@ def main(data_dir, notes=''):
 
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
 
-
     epoch_loss_values = []
     dice_metric_values = []
     dice_metric_values_train = []
@@ -364,7 +365,7 @@ def main(data_dir, notes=''):
     post_pred = Compose([EnsureType(), AsDiscrete(argmax=True, to_onehot=2)])
     post_label = Compose([EnsureType(), AsDiscrete(to_onehot=2)])
     start = time.time()
-    model_path = 'best_metric_' + model._get_name() + '_' + str(max_epochs) + '_' + features_string +'.pth'
+    model_path = 'best_metric_' + model._get_name() + '_' + str(max_epochs) + '_' + features_string + '.pth'
 
     # for epoch in range(max_epochs):
     #     print("-" * 10)
@@ -512,11 +513,11 @@ def main(data_dir, notes=''):
 
     # test
 
-    pred_dir = os.path.join(directory + 'out_' + out_tag, "pred_" + features_string)
+    pred_dir = os.path.join(data_dir + 'out_' + out_tag, "pred_" + features_string)
     if not os.path.exists(pred_dir):
         os.makedirs(pred_dir)
 
-    png_dir = os.path.join(directory + 'out_' + out_tag, "proba_pngs_" + features_string)
+    png_dir = os.path.join(data_dir + 'out_' + out_tag, "proba_pngs_" + features_string)
     if not os.path.exists(png_dir):
         os.makedirs(png_dir)
 
@@ -555,7 +556,7 @@ def main(data_dir, notes=''):
     loader = LoadImage(image_only=True)
     loader_meta = LoadImage(image_only=False)
 
-    model.load_state_dict(torch.load(os.path.join(directory, 'out_' + out_tag, model_path)))
+    model.load_state_dict(torch.load(os.path.join(data_dir, 'out_' + out_tag, model_path)))
 
     model.eval()
 
@@ -599,8 +600,8 @@ def main(data_dir, notes=''):
     pixel_ids = []
 
     # get hemisphere masks for each patients
-    left_hemisphere_masks = glob.glob(directory + 'DATA/left_hemisphere_mask/*')
-    right_hemisphere_masks = glob.glob(directory + 'DATA/right_hemisphere_mask/*')
+    left_hemisphere_masks = glob.glob(data_dir + 'DATA/left_hemisphere_mask/*')
+    right_hemisphere_masks = glob.glob(data_dir + 'DATA/right_hemisphere_mask/*')
 
     with torch.no_grad():
         for i, test_data in enumerate(test_loader):
@@ -615,7 +616,6 @@ def main(data_dir, notes=''):
 
             test_output, test_label, test_image, test_proba = from_engine(
                 ["pred", "label", "image", "proba"])(test_data)
-
 
             original_image = loader_meta(test_data[0]["image_meta_dict"]["filename_or_obj"])
             volx, voly, volz = original_image[1]['pixdim'][1:4]  # meta data
@@ -676,7 +676,7 @@ def main(data_dir, notes=''):
             print(f"Dice score for image: {dice_score:.4f}")
             pred_flat = np.where((hemisphere_mask == 0), np.nan, pred_flat)
             preds_flat.extend(pred_flat)
-            pixel_id = [str(i) + str(name).zfill(3) for name in np.arange(len(pred_flat))] # 0000, 0001 and so on
+            pixel_id = [str(i) + str(name).zfill(3) for name in np.arange(len(pred_flat))]  # 0000, 0001 and so on
             pixel_ids.extend(pixel_id)
             gt_flat = np.where((hemisphere_mask == 0), np.nan, gt_flat)
             gts_flat.extend(gt_flat.astype(int))
@@ -691,10 +691,10 @@ def main(data_dir, notes=''):
                 sensitivity = tp / (tp + fn)
             specificity = tn / (tn + fp)
             if (tp == 0) and (fp == 0):
-               if fn == 0:
-                   ppv = 1
-               else:
-                   ppv = 0
+                if fn == 0:
+                    ppv = 1
+                else:
+                    ppv = 0
             else:
                 ppv = tp / (tp + fp)
             npv = tn / (tn + fn)
@@ -720,10 +720,10 @@ def main(data_dir, notes=''):
                 sensitivity70 = tp / (tp + fn)
             specificity70 = tn / (tn + fp)
             if (tp == 0) and (fp == 0):
-               if fn == 0:
-                   ppv70 = 1
-               else:
-                   ppv70 = 0
+                if fn == 0:
+                    ppv70 = 1
+                else:
+                    ppv70 = 0
             else:
                 ppv70 = tp / (tp + fp)
             npv70 = tn / (tn + fn)
@@ -748,10 +748,10 @@ def main(data_dir, notes=''):
                 sensitivity90 = tp / (tp + fn)
             specificity90 = tn / (tn + fp)
             if (tp == 0) and (fp == 0):
-               if fn == 0:
-                   ppv90 = 1
-               else:
-                   ppv90 = 0
+                if fn == 0:
+                    ppv90 = 1
+                else:
+                    ppv90 = 0
             else:
                 ppv90 = tp / (tp + fp)
             npv90 = tn / (tn + fn)
@@ -767,15 +767,15 @@ def main(data_dir, notes=''):
             size_pred = prediction.sum()
             size_pred_ml = size_pred * pixel_vol / 1000
 
-
             try:
-                dwi_img = glob.glob(os.path.join(directory, 'dwi_test/', subject + '*'))[0]
+                dwi_img = glob.glob(os.path.join(data_dir, 'dwi_test/', subject + '*'))[0]
                 dwi_img = loader(dwi_img)
                 # spartan giving an error
                 dwi_img = dwi_img.detach().numpy()
 
                 save_loc = png_dir + '/' + subject + '_proba.png'
-                numbers = [num_positive, num_positive_predicted, num_negative, num_negative_predicted, tp, tn, fp, fn, sensitivity90]
+                numbers = [num_positive, num_positive_predicted, num_negative, num_negative_predicted, tp, tn, fp, fn,
+                           sensitivity90]
                 # create_dwi_ctp_proba_map(dwi_img, ground_truth, prediction, prediction_70, prediction_90, save_loc,
                 #                          define_zvalues(dwi_img), numbers=numbers, ext='png', save=True)
             except IndexError:
@@ -807,7 +807,6 @@ def main(data_dir, notes=''):
             results.loc[results.id == name, 'npv70'] = npv70
             results.loc[results.id == name, 'npv90'] = npv90
 
-
         # aggregate the final mean dice result
         metric = np.mean(dice_metric)
         metric70 = np.mean(dice_metric70)
@@ -827,11 +826,16 @@ def main(data_dir, notes=''):
         ctp_dl_df[~ctp_dl_df.index.duplicated(keep='first')],
         on='id',
         how='left')
-    results_join.to_csv(directory + 'out_' + out_tag + '/results_' + str(max_epochs) + '_epoch_' + model_name + '_' + loss_name + '_' + features_string + '.csv', index=False)
+    results_join.to_csv(
+        data_dir + 'out_' + out_tag + '/results_' + str(
+            max_epochs) + '_epoch_' + model_name + '_' + loss_name + '_' + features_string + '.csv', index=False)
 
     fpr, tpr, threshold = roc_curve(gts_flat, preds_flat)
-    roc_df = pd.DataFrame(np.asarray([gts_flat, preds_flat]).transpose(), columns=['ground_truth', 'prediction'], index=pixel_ids)
-    roc_df.to_csv(directory + 'out_' + out_tag + '/roc_data_' + str(max_epochs) + '_epoch_' + model_name + '_' + loss_name + '_' + features_string + '.csv', index=False)
+    roc_df = pd.DataFrame(np.asarray([gts_flat, preds_flat]).transpose(), columns=['ground_truth', 'prediction'],
+                          index=pixel_ids)
+    roc_df.to_csv(
+        data_dir + 'out_' + out_tag + '/roc_data_' + str(
+            max_epochs) + '_epoch_' + model_name + '_' + loss_name + '_' + features_string + '.csv', index=False)
     #
     roc_auc = auc(fpr, tpr)
     plt.title('Receiver Operating Characteristic')
@@ -842,14 +846,18 @@ def main(data_dir, notes=''):
     plt.ylim([0, 1])
     plt.ylabel('Sensitivity')
     plt.xlabel('1 - Specificity')
-    plt.savefig(os.path.join(directory + 'out_' + out_tag,
-                             'roc_plot_' + str(max_epochs) + '_epoch_' + model_name + '_' + loss_name + '_' + features_string +'.png'),
+    plt.savefig(os.path.join(data_dir + 'out_' + out_tag,
+                             'roc_plot_' + str(
+                                 max_epochs) + '_epoch_' + model_name + '_' + loss_name + '_' + features_string + '.png'),
                 bbox_inches='tight', dpi=300, format='png')
     plt.close()
+
 
 if __name__ == "__main__":
     # Environment variables which need to be
     # set when using c10d's default "env"
     # initialization mode.
-    main(*sys.argv[1:])
 
+    # FEATURES SHOULD BE LISTED IN THIS ORDER = ['DT', 'CBF', 'CBV', 'MTT', 'ncct']
+
+    main(*sys.argv[1:])
