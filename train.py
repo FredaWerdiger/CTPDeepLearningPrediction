@@ -1,22 +1,19 @@
+import random
 import sys
 from fns import *
 
 sys.path.append('../DenseNetFCN3D-pytorch')
 from densenet import *
 
-from monai.config import print_config
 from monai.data import CacheDataset, DataLoader, decollate_batch
-from monai.losses import DiceLoss, DiceCELoss
-from monai.inferers import sliding_window_inference
-from monai.networks.layers import Norm
+from monai.losses import DiceCELoss
+from torch.optim import Adam
+import torch.nn.functional as f
 from monai.metrics import DiceMetric
 from monai.handlers import EarlyStopHandler
 from monai.handlers.utils import from_engine
 from monai.utils import first, set_determinism
-# from torchmetrics import Dice
-from monai.visualize import GradCAM
-from sklearn.metrics import classification_report
-from monai.networks.nets import UNet, AttentionUnet
+from monai.networks.nets import AttentionUnet
 from monai.transforms import (
     AsDiscrete,
     AsDiscreted,
@@ -51,7 +48,6 @@ import glob
 import time
 import SimpleITK as sitk
 from sklearn.model_selection import train_test_split
-from sklearn.cluster import KMeans
 import torch
 
 '''
@@ -74,7 +70,10 @@ notes = anything you want to add to the results print out.
 
 
 def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, notes=''):
-    # DEFAULT PARAMETERS
+
+    # ++++++++++++++++++++++
+    # SET DEFAULT PARAMETERS
+    # ++++++++++++++++++++++
     if features is None:
         features = ['DT', 'CBF', 'CBV', 'ncct']
     else:
@@ -104,7 +103,9 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
     df['image_paths'] = image_paths
     df['mask_paths'] = mask_paths
 
+    # +++++++++++++++++++++++
     # STRATIFY BY LESION SIZE
+    # +++++++++++++++++++++++
 
     random_state = 42
     lesion_size = []
@@ -117,7 +118,7 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
         size = label.GetNumberOfPixels(1)
         lesion_size.append(voxel_size * size)
 
-    # lesions less than 5 mL
+    # SMALL LESIONS DEFINED AS LESS THAN 5ML
     labels = (np.asarray(lesion_size) < 5) * 1
     df['size_labels'] = labels
 
@@ -132,7 +133,6 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
                                          shuffle=True,
                                          stratify=labels)
 
-    # get labels list that correspond with test id
     test_df = df[df.apply(lambda x: x['dl_id'] in test_id, axis=1)]
     test_labels = test_df.size_labels.to_list()
     test_id = test_df.dl_id.to_list()
@@ -145,14 +145,26 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
                                               stratify=test_labels)
 
     # GET THE NUMBER OF SMALL LESIONS IN EACH GROUP
+    # LABEL IDS
+    df['group'] = ''
     train_df = df[df.apply(lambda x: x.dl_id in train_id, axis=1)]
     num_small_train = len(train_df[train_df.apply(lambda x: x.size_labels == 1, axis=1)])
+    for id in train_id:
+        df.loc[df.dl_id == id, 'group'] = 'train'
 
     val_df = df[df.apply(lambda x: x.dl_id in validation_id, axis=1)]
     num_small_val = len(val_df[val_df.apply(lambda x: x.size_labels == 1, axis=1)])
+    for id in validation_id:
+        df.loc[df.dl_id == id, 'group'] = 'validation'
 
     test_df = df[df.apply(lambda x: x.dl_id in test_id, axis=1)]
     num_small_test = len(test_df[test_df.apply(lambda x: x.size_labels == 1, axis=1)])
+    for id in test_id:
+        df.loc[df.dl_id == id, 'group'] = 'test'
+
+    # +++++++++++++
+    # BUILD DATASET
+    # +++++++++++++
 
     def make_dict(id):
         id = [str(num).zfill(3) for num in id]
@@ -297,10 +309,17 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
                              batch_size=1,
                              pin_memory=True)
 
-    # # sanity check to see everything is there
-    s = 50
-    data_example = test_ds[0]
+
+    # DERIVE NUMBER OF INPUT CHANNELS
+    m = random.randint(0, len(train_files) - 1)
+    data_example = train_dataset[m]
     ch_in = data_example['image'].shape[0]
+
+    # UNCOMMENT BELOW TO CONDUCT SANITY CHECKS.
+    # EACH RUN GENERATES A DIFFERENT RANDOM SLICE
+    # OF A DIFFERENT RANDOM IMAGE
+
+    # s = random.randint(20, image_size[0] - 20)
     # plt.figure("image", (18, 4))
     # for i in range(ch_in):
     #     plt.subplot(1, ch_in + 1, i + 1)
@@ -316,7 +335,7 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
     # plt.show()
     # plt.close()
 
-    device = 'cuda'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     channels = (16, 32, 64)
 
     model = AttentionUnet(
@@ -326,17 +345,9 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
         channels=channels,
         strides=(2, 2, 2),
     )
-    # model = U_Net(ch_in, 2)
-    # model = AttU_Net(ch_in, 2)
 
-    # model = torch.nn.DataParallel(model)
     model.to(device)
 
-    loss_function = DiceLoss(smooth_dr=1e-5,
-                             smooth_nr=0,
-                             to_onehot_y=True,
-                             softmax=True,
-                             include_background=False)
     loss_function = DiceCELoss(smooth_dr=1e-5,
                                smooth_nr=0,
                                to_onehot_y=True,
@@ -365,158 +376,161 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
     post_pred = Compose([EnsureType(), AsDiscrete(argmax=True, to_onehot=2)])
     post_label = Compose([EnsureType(), AsDiscrete(to_onehot=2)])
     start = time.time()
+    # SAVING THE MODEL DURING TRAINING
     model_path = 'best_metric_' + model._get_name() + '_' + str(max_epochs) + '_' + features_string + '.pth'
 
-    # for epoch in range(max_epochs):
-    #     print("-" * 10)
-    #     print(f"epoch {epoch + 1}/{max_epochs}")
-    #     epoch_loss = 0
-    #     step = 0
-    #     model.train()
-    #     for batch_data in train_loader:
-    #         step += 1
-    #         inputs, labels = (
-    #             batch_data["image"].to(device),
-    #             batch_data["label"].to(device),
-    #         )
-    #         optimizer.zero_grad()
-    #         outputs = model(inputs)
-    #         loss = loss_function(outputs, labels)
-    #         loss.backward()
-    #         epoch_loss += loss.item()
-    #         optimizer.step()
-    #     lr_scheduler.step()
-    #     epoch_loss /= step
-    #     epoch_loss_values.append(epoch_loss)
-    #     print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}")
-    #
-    #     if (epoch + 1) % val_interval == 0:
-    #         model.eval()
-    #         print("Evaluating...")
-    #         with torch.no_grad():
-    #             for val_data in val_loader:
-    #                 val_inputs, val_labels = (
-    #                     val_data["image"].to(device),
-    #                     val_data["label"].to(device),
-    #                 )
-    #                 val_outputs = model(val_inputs)
-    #
-    #                 # compute metric for current iteration
-    #                 # dice_metric_torch_macro(val_outputs, val_labels.long())
-    #                 # now to for the MONAI dice metric
-    #                 val_outputs = [post_pred(i) for i in decollate_batch(val_outputs)]
-    #                 val_labels = [post_label(i) for i in decollate_batch(val_labels)]
-    #                 dice_metric(val_outputs, val_labels)
-    #
-    #             mean_dice = dice_metric.aggregate().item()
-    #             dice_metric.reset()
-    #             dice_metric_values.append(mean_dice)
-    #
-    #             # repeating the process for training data to check for overfitting
-    #             for val_data in train_loader:
-    #                 val_inputs, val_labels = (
-    #                     val_data["image"].to(device),
-    #                     val_data["label"].to(device),
-    #                 )
-    #                 val_outputs = model(val_inputs)
-    #
-    #                 # compute metric for current iteration
-    #                 # dice_metric_torch_macro(val_outputs, val_labels.long())
-    #                 # now to for the MONAI dice metric
-    #                 val_outputs = [post_pred(i) for i in decollate_batch(val_outputs)]
-    #                 val_labels = [post_label(i) for i in decollate_batch(val_labels)]
-    #                 dice_metric_train(val_outputs, val_labels)
-    #
-    #             mean_dice_train = dice_metric_train.aggregate().item()
-    #             dice_metric_train.reset()
-    #             dice_metric_values_train.append(mean_dice_train)
-    #
-    #             if mean_dice > best_metric:
-    #                 best_metric = mean_dice
-    #                 best_metric_epoch = epoch + 1
-    #                 torch.save(model.state_dict(), os.path.join(
-    #                     directory, 'out_' + out_tag, model_path))
-    #                 print("saved new best metric model")
-    #
-    #             print(
-    #                 f"current epoch: {epoch + 1} current mean dice: {mean_dice:.4f}"
-    #                 f"\nbest mean dice: {best_metric:.4f} "
-    #                 f"at epoch: {best_metric_epoch}"
-    #             )
-    #     del loss, outputs
-    # end = time.time()
-    # time_taken = end - start
-    # print(f"Time taken: {round(time_taken, 0)} seconds")
-    # time_taken_hours = time_taken/3600
-    # time_taken_mins = np.ceil((time_taken/3600 - int(time_taken/3600)) * 60)
-    # time_taken_hours = int(time_taken_hours)
-    #
+    # ++++++++++++++++
+    # TRAIN THE MODEL
+    # ++++++++++++++++
+
+    for epoch in range(max_epochs):
+        print("-" * 10)
+        print(f"epoch {epoch + 1}/{max_epochs}")
+        epoch_loss = 0
+        step = 0
+        model.train()
+        for batch_data in train_loader:
+            step += 1
+            inputs, labels = (
+                batch_data["image"].to(device),
+                batch_data["label"].to(device),
+            )
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = loss_function(outputs, labels)
+            loss.backward()
+            epoch_loss += loss.item()
+            optimizer.step()
+        lr_scheduler.step()
+        epoch_loss /= step
+        epoch_loss_values.append(epoch_loss)
+        print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}")
+
+        if (epoch + 1) % val_interval == 0:
+            model.eval()
+            print("Evaluating...")
+            with torch.no_grad():
+                for val_data in val_loader:
+                    val_inputs, val_labels = (
+                        val_data["image"].to(device),
+                        val_data["label"].to(device),
+                    )
+                    val_outputs = model(val_inputs)
+                    # compute metric for current iteration
+                    val_outputs = [post_pred(i) for i in decollate_batch(val_outputs)]
+                    val_labels = [post_label(i) for i in decollate_batch(val_labels)]
+                    dice_metric(val_outputs, val_labels)
+
+                mean_dice = dice_metric.aggregate().item()
+                dice_metric.reset()
+                dice_metric_values.append(mean_dice)
+
+                # repeating the process for training data to check for overfitting
+                for val_data in train_loader:
+                    val_inputs, val_labels = (
+                        val_data["image"].to(device),
+                        val_data["label"].to(device),
+                    )
+                    val_outputs = model(val_inputs)
+
+                    # compute metric for current iteration
+                    val_outputs = [post_pred(i) for i in decollate_batch(val_outputs)]
+                    val_labels = [post_label(i) for i in decollate_batch(val_labels)]
+                    dice_metric_train(val_outputs, val_labels)
+
+                mean_dice_train = dice_metric_train.aggregate().item()
+                dice_metric_train.reset()
+                dice_metric_values_train.append(mean_dice_train)
+
+                if mean_dice > best_metric:
+                    best_metric = mean_dice
+                    best_metric_epoch = epoch + 1
+                    torch.save(model.state_dict(), os.path.join(
+                        data_dir, 'out_' + out_tag, model_path))
+                    print("saved new best metric model")
+
+                print(
+                    f"current epoch: {epoch + 1} current mean dice: {mean_dice:.4f}"
+                    f"\nbest mean dice: {best_metric:.4f} "
+                    f"at epoch: {best_metric_epoch}"
+                )
+        del loss, outputs
+    end = time.time()
+    time_taken = end - start
+    print(f"Time taken: {round(time_taken, 0)} seconds")
+    time_taken_hours = time_taken/3600
+    time_taken_mins = np.ceil((time_taken/3600 - int(time_taken/3600)) * 60)
+    time_taken_hours = int(time_taken_hours)
+
     model_name = model._get_name()
     loss_name = loss_function._get_name()
-    # with open(
-    #         directory + 'out_' + out_tag + '/model_info_' + str(max_epochs) + '_epoch_' + model_name + '_' + loss_name + '_' + features_string +'.txt', 'w') as myfile:
-    #     myfile.write(f'Train dataset size: {len(train_files)}\n')
-    #     myfile.write(f'Number semi-auto segmented: {num_semi_train}\n')
-    #     myfile.write(f'Number of lesions under 5mL: {num_small_train}\n')
-    #     myfile.write(f'Validation dataset size: {len(val_files)}\n')
-    #     myfile.write(f'Number semi-auto segmented: {num_semi_val}\n')
-    #     myfile.write(f'Number of lesions under 5mL: {num_small_val}\n')
-    #     myfile.write(f'Test dataset size: {len(test_files)}\n')
-    #     myfile.write(f'Number semi-auto segmented: {num_semi_test}\n')
-    #     myfile.write(f'Number of lesions under 5mL: {num_small_test}\n')
-    #     myfile.write(f'Intended number of features: {len(features)}\n')
-    #     myfile.write(f'Actual number of features: {ch_in}\n')
-    #     myfile.write('Features: ')
-    #     myfile.write(features_string)
-    #     myfile.write('\n')
-    #     myfile.write(f'Model: {model_name}\n')
-    #     myfile.write(f'Loss function: {loss_name}\n')
-    #     myfile.write(f'Initial Learning Rate: {learning_rate}\n')
-    #     myfile.write("Atrophy filter used? ")
-    #     if atrophy:
-    #         myfile.write("yes\n")
-    #     else:
-    #         myfile.write("no\n")
-    #     myfile.write(f'Number of epochs: {max_epochs}\n')
-    #     myfile.write(f'Batch size: {batch_size}\n')
-    #     myfile.write(f'Image size: {image_size}\n')
-    #     myfile.write(f'Patch size: {patch_size}\n')
-    #     myfile.write(f'channels: {channels}\n')
-    #     myfile.write(f'Validation interval: {val_interval}\n')
-    #     myfile.write(f"Best metric: {best_metric:.4f}\n")
-    #     myfile.write(f"Best metric epoch: {best_metric_epoch}\n")
-    #     myfile.write(f"Time taken: {time_taken_hours} hours, {time_taken_mins} mins\n")
-    #     myfile.write(notes)
-    #
-    #
-    # # plot things
-    # plt.figure("train", (12, 6))
-    # plt.subplot(1, 2, 1)
-    # plt.title("Average Loss per Epoch")
-    # x = [i + 1 for i in range(len(epoch_loss_values))]
-    # y = epoch_loss_values
-    # plt.xlabel("epoch")
-    # plt.plot(x, y)
-    # plt.subplot(1, 2, 2)
-    # plt.title("Mean Dice (Accuracy)")
-    # x = [val_interval * (i + 1) for i in range(len(dice_metric_values))]
-    # y = dice_metric_values
-    # plt.xlabel("epoch")
-    # plt.plot(x, y, 'b', label="Dice on validation data")
-    # y = dice_metric_values_train
-    # plt.plot(x, y, 'k', label="Dice on training data")
-    # plt.legend(loc="center right")
-    # plt.savefig(os.path.join(directory + 'out_' + out_tag,
-    #                          'loss_plot_' + str(max_epochs) + '_epoch_' + model_name + '_' + loss_name + '_' + features_string +'.png'),
-    #             bbox_inches='tight', dpi=300, format='png')
-    # plt.close()
 
-    # test
+    # ++++++++++++++++++++++++++++++
+    # SAVE INFORMATION ABOUT RESULTS
+    # ++++++++++++++++++++++++++++++
 
+    # SAVE A TEXT FILE WITH ESSENTIAL INFORMATION FOR REPRODUCTION
+    with open(
+            data_dir + 'out_' + out_tag + '/model_info_' + str(max_epochs) + '_epoch_' + model_name + '_' + loss_name + '_' + features_string + '.txt', 'w') as myfile:
+        myfile.write(f'Train dataset size: {len(train_files)}\n')
+        myfile.write(f'Number of lesions under 5mL: {num_small_train}\n')
+        myfile.write(f'Validation dataset size: {len(val_files)}\n')
+        myfile.write(f'Number of lesions under 5mL: {num_small_val}\n')
+        myfile.write(f'Test dataset size: {len(test_files)}\n')
+        myfile.write(f'Number of lesions under 5mL: {num_small_test}\n')
+        myfile.write(f'Intended number of features: {len(features)}\n')
+        myfile.write(f'Actual number of features: {ch_in}\n')
+        myfile.write('Features: ')
+        myfile.write(features_string)
+        myfile.write('\n')
+        myfile.write(f'Model: {model_name}\n')
+        myfile.write(f'Loss function: {loss_name}\n')
+        myfile.write(f'Initial Learning Rate: {learning_rate}\n')
+        myfile.write(f'Number of epochs: {max_epochs}\n')
+        myfile.write(f'Batch size: {batch_size}\n')
+        myfile.write(f'Image size: {image_size}\n')
+        myfile.write(f'Patch size: {patch_size}\n')
+        myfile.write(f'channels: {channels}\n')
+        myfile.write(f'Validation interval: {val_interval}\n')
+        myfile.write(f"Best metric: {best_metric:.4f}\n")
+        myfile.write(f"Best metric epoch: {best_metric_epoch}\n")
+        myfile.write(f"Time taken: {time_taken_hours} hours, {time_taken_mins} mins\n")
+        myfile.write(notes)
+
+    # PLOT TRAINING AND VALIDATION LOSS PER EPOCH
+    plt.figure("train", (12, 6))
+    plt.subplot(1, 2, 1)
+    plt.title("Average Loss per Epoch")
+    x = [i + 1 for i in range(len(epoch_loss_values))]
+    y = epoch_loss_values
+    plt.xlabel("epoch")
+    plt.plot(x, y)
+    plt.subplot(1, 2, 2)
+    plt.title("Mean Dice (Accuracy)")
+    x = [val_interval * (i + 1) for i in range(len(dice_metric_values))]
+    y = dice_metric_values
+    plt.xlabel("epoch")
+    plt.plot(x, y, 'b', label="Dice on validation data")
+    y = dice_metric_values_train
+    plt.plot(x, y, 'k', label="Dice on training data")
+    plt.legend(loc="center right")
+    plt.savefig(os.path.join(data_dir + 'out_' + out_tag,
+                             'loss_plot_' + str(max_epochs) + '_epoch_' + model_name + '_' + loss_name + '_' + features_string +'.png'),
+                bbox_inches='tight', dpi=300, format='png')
+    plt.close()
+
+    # +++++++++++++++++++++++++
+    # INFERENCE ON THE TEST SET
+    # +++++++++++++++++++++++++
+    # location to save binary predictions (50% probability threshold)
     pred_dir = os.path.join(data_dir + 'out_' + out_tag, "pred_" + features_string)
     if not os.path.exists(pred_dir):
         os.makedirs(pred_dir)
-
+    # location to save probability maps
+    proba_dir = os.path.join(data_dir + 'out_' + out_tag, "proba_" + features_string)
+    if not os.path.exists(pred_dir):
+        os.makedirs(pred_dir)
+    # location to save images for display
     png_dir = os.path.join(data_dir + 'out_' + out_tag, "proba_pngs_" + features_string)
     if not os.path.exists(png_dir):
         os.makedirs(png_dir)
@@ -537,20 +551,20 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
         ),
         AsDiscreted(keys="label", to_onehot=2),
         AsDiscreted(keys="pred", argmax=True, to_onehot=2),
-        # SaveImaged(
-        #     keys="proba",
-        #     meta_keys="pred_meta_dict",
-        #     output_dir=os.path.join(pred_dir, 'prob'),
-        #     output_postfix="proba",
-        #     resample=False,
-        #     separate_folder=False),
-        # SaveImaged(
-        #     keys="pred",
-        #     meta_keys="pred_meta_dict",
-        #     output_dir=pred_dir,
-        #     output_postfix="seg",
-        #     resample=False,
-        #     separate_folder=False)
+        SaveImaged(
+            keys="proba",
+            meta_keys="pred_meta_dict",
+            output_dir=proba_dir,
+            output_postfix="proba",
+            resample=False,
+            separate_folder=False),
+        SaveImaged(
+            keys="pred",
+            meta_keys="pred_meta_dict",
+            output_dir=pred_dir,
+            output_postfix="seg",
+            resample=False,
+            separate_folder=False)
     ])
 
     loader = LoadImage(image_only=True)
@@ -560,7 +574,7 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
 
     model.eval()
 
-    results = pd.DataFrame(columns=['id',
+    results = pd.DataFrame(columns=['dl_id',
                                     'dice',
                                     'hemisphere',
                                     'dice70',
@@ -584,12 +598,12 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
                                     'size_pred',
                                     'size_ml',
                                     'size_pred_ml'])
-    results['id'] = [str(item).zfill(3) for item in test_id]
-    # change ctp id dl id to string
-    ctp_dl_df['dl_id'] = ctp_dl_df['dl_id'].apply(lambda row: str(row).zfill(3))
-    ctp_dl_df.set_index('dl_id', inplace=True)
 
-    from sklearn.metrics import f1_score, auc, recall_score, precision_score, roc_curve, confusion_matrix
+    test_id.sort()
+    results['dl_id'] = test_id
+    # df.set_index('dl_id', inplace=True)
+
+    from sklearn.metrics import f1_score, auc, roc_curve
     dice_metric = []
     dice_metric70 = []
     dice_metric90 = []
@@ -617,7 +631,8 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
             test_output, test_label, test_image, test_proba = from_engine(
                 ["pred", "label", "image", "proba"])(test_data)
 
-            original_image = loader_meta(test_data[0]["image_meta_dict"]["filename_or_obj"])
+            original_path = test_data[0]["image_meta_dict"]["filename_or_obj"]
+            original_image = loader_meta(original_path)
             volx, voly, volz = original_image[1]['pixdim'][1:4]  # meta data
             pixel_vol = volx * voly * volz
 
@@ -627,9 +642,7 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
             prediction_70 = (test_proba[0][1].detach().numpy() >= 0.7) * 1
             prediction_90 = (test_proba[0][1].detach().numpy() >= 0.9) * 1
 
-            name = os.path.basename(
-                test_data[0]["image_meta_dict"]["filename_or_obj"]).split('.nii.gz')[0].split('_')[1]
-            subject = ctp_dl_df.loc[[name], "subject"].values[0]
+            subject = df.loc[df.image_paths == original_path, "dl_id"].values[0]
             left_mask = [file for file in left_hemisphere_masks if name in file][0]
             right_mask = [file for file in right_hemisphere_masks if name in file][0]
             left_im, right_im = [loader(im) for im in [left_mask, right_mask]]
@@ -785,9 +798,6 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
             results.loc[results.id == name, 'size_ml'] = size_ml
             results.loc[results.id == name, 'size_pred'] = size_pred
             results.loc[results.id == name, 'size_pred_ml'] = size_pred_ml
-            # results.loc[results.id == name, 'px_x'] = volx
-            # results.loc[results.id == name, 'px_y'] = voly
-            # results.loc[results.id == name, 'px_z'] = volz
             results.loc[results.id == name, 'dice'] = dice_score
             results.loc[results.id == name, 'dice70'] = dice70
             results.loc[results.id == name, 'dice90'] = dice90
@@ -823,7 +833,7 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
     results['mean_specificity'] = metric_specificity
     results['mean_auc'] = metric_auc
     results_join = results.join(
-        ctp_dl_df[~ctp_dl_df.index.duplicated(keep='first')],
+        df[~df.index.duplicated(keep='first')],
         on='id',
         how='left')
     results_join.to_csv(
