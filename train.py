@@ -10,9 +10,8 @@ from monai.losses import DiceCELoss
 from torch.optim import Adam
 import torch.nn.functional as f
 from monai.metrics import DiceMetric
-from monai.handlers import EarlyStopHandler
 from monai.handlers.utils import from_engine
-from monai.utils import first, set_determinism
+from monai.utils import set_determinism
 from monai.networks.nets import AttentionUnet
 from monai.transforms import (
     AsDiscrete,
@@ -28,35 +27,35 @@ from monai.transforms import (
     LoadImaged,
     NormalizeIntensityd,
     RandAffined,
-    RandCropByPosNegLabeld,
     RandFlipd,
     RandScaleIntensityd,
     RandShiftIntensityd,
     RepeatChannelD,
     Resized,
     SaveImaged,
-    ScaleIntensityd,
     ThresholdIntensityd,
     SplitDimd,
 )
 
 import pandas as pd
 import numpy as np
-import math
 import matplotlib.pyplot as plt
 import glob
 import time
 import SimpleITK as sitk
 from sklearn.model_selection import train_test_split
 import torch
+from sklearn.metrics import f1_score, auc, roc_curve
 
 '''
 Input features
 
 data_dir = location of the data. 
 
-Data should be organised as folders
-"images", "nccts" and "labels" for stacked CTP maps, contrast free CT and segmentation, respectively.
+Data should be organised as folders as per organise_data.py
+"images", "nccts" and "masks" for stacked CTP maps, contrast free CT and segmentation, respectively.
+
+in addition hemisphere masks can be used for analysis of results and dwi images can be used for results pngs.
 
 features = list of features to include in the model.
 Features should be in this order: 'DT', 'CBF', 'CBV', 'MTT', 'ncct'.
@@ -90,18 +89,28 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
     mask_paths.sort()
     ncct_paths = glob.glob(os.path.join(data_dir, 'ncct', '*'))
     ncct_paths.sort()
+    # below is only for creating results images after, optional
+    dwi_paths = glob.glob(os.path.join(data_dir, 'dwi', '*'))
+    dwi_paths.sort()
+    # below are used to get results from one hemisphere
+    # these are generated using https://github.com/FredaWerdiger/automatic_rotation
+    left_hemisphere_masks = glob.glob(os.path.join(data_dir, 'left_hemisphere_mask', '*'))
+    right_hemisphere_masks = glob.glob(os.path.join(data_dir, 'right_hemisphere_mask', '*'))
 
     # ENSURE DATA IS THERE
     assert image_paths is not None
     assert len(image_paths) == len(mask_paths) == len(ncct_paths)
 
     # CREATE LABEL AND DATAFRAME
+    # labels should correspond to the image titles
     dl_id = [str(num) for num in np.arange(len(image_paths))]
     dl_id = [name.zfill(len(dl_id[-1])) for name in dl_id]
 
     df = pd.DataFrame(dl_id, columns=['dl_id'])
+    # save the image paths associated with the labels for reference
     df['image_paths'] = image_paths
     df['mask_paths'] = mask_paths
+    df['dwi_paths'] = dwi_paths
 
     # +++++++++++++++++++++++
     # STRATIFY BY LESION SIZE
@@ -196,8 +205,8 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
 
     print(f"out_tag = {out_tag}")
 
-    if not os.path.exists(data_dir + 'out_' + out_tag):
-        os.makedirs(data_dir + 'out_' + out_tag)
+    if not os.path.exists(os.path.join(data_dir, 'out_' + out_tag)):
+        os.makedirs(os.path.join(data_dir, 'out_' + out_tag))
 
     set_determinism(seed=42)
 
@@ -309,16 +318,15 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
                              batch_size=1,
                              pin_memory=True)
 
+    # ++++++++++++
+    # SANITY CHECK
+    # ++++++++++++
 
-    # DERIVE NUMBER OF INPUT CHANNELS
+    # UNCOMMENT EVERYTHING BELOW FOR SANITY CHECK
+    # EACH RUN GENERATES A DIFFERENT RANDOM SLICE OF A DIFFERENT RANDOM IMAGE
     m = random.randint(0, len(train_files) - 1)
     data_example = train_dataset[m]
-    ch_in = data_example['image'].shape[0]
-
-    # UNCOMMENT BELOW TO CONDUCT SANITY CHECKS.
-    # EACH RUN GENERATES A DIFFERENT RANDOM SLICE
-    # OF A DIFFERENT RANDOM IMAGE
-
+    ch_in = data_example['image'].shape[0] # used for model input information
     # s = random.randint(20, image_size[0] - 20)
     # plt.figure("image", (18, 4))
     # for i in range(ch_in):
@@ -330,7 +338,7 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
     # print(f"label shape: {data_example['label'].shape}")
     # plt.subplot(1, 6, 6)
     # plt.title("label")
-    # plt.imshow(data_example["label"][0, :, :, s].detach().cpu(), cmap="jet")
+    # plt.imshow(data_example["label"][0, :, :, s].detach().cpu(), cmap="gray")
     # plt.axis('off')
     # plt.show()
     # plt.close()
@@ -522,20 +530,19 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
     # +++++++++++++++++++++++++
     # INFERENCE ON THE TEST SET
     # +++++++++++++++++++++++++
+
     # location to save binary predictions (50% probability threshold)
-    pred_dir = os.path.join(data_dir + 'out_' + out_tag, "pred_" + features_string)
+    pred_dir = os.path.join(data_dir, 'out_' + out_tag, "pred_" + features_string)
     if not os.path.exists(pred_dir):
         os.makedirs(pred_dir)
     # location to save probability maps
-    proba_dir = os.path.join(data_dir + 'out_' + out_tag, "proba_" + features_string)
+    proba_dir = os.path.join(data_dir, 'out_' + out_tag, "proba_" + features_string)
     if not os.path.exists(pred_dir):
         os.makedirs(pred_dir)
     # location to save images for display
-    png_dir = os.path.join(data_dir + 'out_' + out_tag, "proba_pngs_" + features_string)
+    png_dir = os.path.join(data_dir, 'out_' + out_tag, "proba_pngs_" + features_string)
     if not os.path.exists(png_dir):
         os.makedirs(png_dir)
-
-    dice_metric = DiceMetric(include_background=False, reduction="mean")
 
     post_transforms = Compose([
         EnsureTyped(keys=["pred", "label"]),
@@ -601,9 +608,7 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
 
     test_id.sort()
     results['dl_id'] = test_id
-    # df.set_index('dl_id', inplace=True)
 
-    from sklearn.metrics import f1_score, auc, roc_curve
     dice_metric = []
     dice_metric70 = []
     dice_metric90 = []
@@ -611,72 +616,69 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
     specificities = []
     gts_flat = []
     preds_flat = []
-    pixel_ids = []
-
-    # get hemisphere masks for each patients
-    left_hemisphere_masks = glob.glob(data_dir + 'DATA/left_hemisphere_mask/*')
-    right_hemisphere_masks = glob.glob(data_dir + 'DATA/right_hemisphere_mask/*')
 
     with torch.no_grad():
         for i, test_data in enumerate(test_loader):
             test_inputs = test_data["image"].to(device)
-
             test_data["pred"] = model(test_inputs)
-
-            prob = f.softmax(test_data["pred"], dim=1)  # probability of infarct
+            # GENERATE THE PROBABILITY OF INFARCT
+            prob = f.softmax(test_data["pred"], dim=1)
             test_data["proba"] = prob
-
             test_data = [post_transforms(i) for i in decollate_batch(test_data)]
-
             test_output, test_label, test_image, test_proba = from_engine(
                 ["pred", "label", "image", "proba"])(test_data)
-
-            original_path = test_data[0]["image_meta_dict"]["filename_or_obj"]
+            # GET THE PATH OF THE ORIGINAL IMAGE FILE
+            original_path = test_data[0]["image_meta_dict"]["filename_or_obj"][0]
             original_image = loader_meta(original_path)
-            volx, voly, volz = original_image[1]['pixdim'][1:4]  # meta data
+            # GET THE SIZE OF THE PIXEL FOR CALCULATING ABSOLUTE VOLUME
+            volx, voly, volz = original_image[1]['pixdim'][1:4]
             pixel_vol = volx * voly * volz
 
             ground_truth = test_label[0][1].detach().numpy()
-            proba = test_proba[0][1].detach().numpy()
+            # GET THE BINARY PREDICTION FROM EACH PROBABILITY BAND MAP 50/70/90
             prediction = (test_proba[0][1].detach().numpy() >= 0.5) * 1
             prediction_70 = (test_proba[0][1].detach().numpy() >= 0.7) * 1
             prediction_90 = (test_proba[0][1].detach().numpy() >= 0.9) * 1
+            # get the name of the subject - dl_id - based on the image path
+            name = df[df.apply(lambda x:
+                                  os.path.basename(x.image_paths) == os.path.basename(original_path),
+                                  axis=1)].dl_id.values[0]
+            # get the hemisphere masks associated with each subject
+            hemisphere_mask = None
+            try:
+                left_mask = [file for file in left_hemisphere_masks if name in file][0]
+                right_mask = [file for file in right_hemisphere_masks if name in file][0]
+                left_im, right_im = [loader(im) for im in [left_mask, right_mask]]
+                left_np, right_np = [im.detach().numpy() for im in [left_im, right_im]]
 
-            subject = df.loc[df.image_paths == original_path, "dl_id"].values[0]
-            left_mask = [file for file in left_hemisphere_masks if name in file][0]
-            right_mask = [file for file in right_hemisphere_masks if name in file][0]
-            left_im, right_im = [loader(im) for im in [left_mask, right_mask]]
-            left_np, right_np = [im.detach().numpy() for im in [left_im, right_im]]
+                # find which hemisphere the lesion is in
+                right_masked = right_np * ground_truth
+                left_masked = left_np * ground_truth
 
-            # find which hemisphere
-            right_masked = right_np * ground_truth
-            left_masked = left_np * ground_truth
-
-            # see if there are any pixels in each corner
-            hemisphere_mask = ''
-            counts_right = np.count_nonzero(right_masked)
-            counts_left = np.count_nonzero(left_masked)
-            if counts_right > counts_left:
-                hemisphere_mask = right_np.flatten()
-                results.loc[results.id == name, 'hemisphere'] = 'right'
-            elif counts_right < counts_left:
-                hemisphere_mask = left_np.flatten()
-                results.loc[results.id == name, 'hemisphere'] = 'left'
-            else:
-                # is this case there is no lesion, but still a prediction?
-                right_masked = right_np * prediction
-                left_masked = left_np * prediction
+                # see if there are any pixels in each corner
                 counts_right = np.count_nonzero(right_masked)
                 counts_left = np.count_nonzero(left_masked)
                 if counts_right > counts_left:
                     hemisphere_mask = right_np.flatten()
                     results.loc[results.id == name, 'hemisphere'] = 'right'
-                else:
+                elif counts_right < counts_left:
                     hemisphere_mask = left_np.flatten()
                     results.loc[results.id == name, 'hemisphere'] = 'left'
-
+                else:
+                    # is this case there is no lesion, but still a prediction?
+                    right_masked = right_np * prediction
+                    left_masked = left_np * prediction
+                    counts_right = np.count_nonzero(right_masked)
+                    counts_left = np.count_nonzero(left_masked)
+                    if counts_right > counts_left:
+                        hemisphere_mask = right_np.flatten()
+                        results.loc[results.id == name, 'hemisphere'] = 'right'
+                    else:
+                        hemisphere_mask = left_np.flatten()
+                        results.loc[results.id == name, 'hemisphere'] = 'left'
+            except IndexError:
+                print('No hemisphere mask, evaluating across whole brain')
             gt_flat = ground_truth.flatten()
-            # proba_flat = proba.flatten()
             pred_flat = prediction.flatten()
             pred70_flat = prediction_70.flatten()
             pred90_flat = prediction_90.flatten()
@@ -687,13 +689,12 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
             dice90 = f1_score(gt_flat, pred90_flat)
             dice_metric90.append(dice90)
             print(f"Dice score for image: {dice_score:.4f}")
-            pred_flat = np.where((hemisphere_mask == 0), np.nan, pred_flat)
+            if hemisphere_mask is not None:
+                pred_flat = np.where((hemisphere_mask == 0), np.nan, pred_flat)
+                gt_flat = np.where((hemisphere_mask == 0), np.nan, gt_flat)
+                core_flat = np.where(hemisphere_mask == 0, np.nan, pred_flat)
             preds_flat.extend(pred_flat)
-            pixel_id = [str(i) + str(name).zfill(3) for name in np.arange(len(pred_flat))]  # 0000, 0001 and so on
-            pixel_ids.extend(pixel_id)
-            gt_flat = np.where((hemisphere_mask == 0), np.nan, gt_flat)
             gts_flat.extend(gt_flat.astype(int))
-            core_flat = np.where(hemisphere_mask == 0, np.nan, pred_flat)
             tp = len(np.where((gt_flat == 1) & (core_flat == 1))[0])
             fp = len(np.where((gt_flat == 0) & (core_flat == 1))[0])
             fn = len(np.where((gt_flat == 1) & (core_flat == 0))[0])
@@ -717,9 +718,8 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
             auc_score = auc(fpr, tpr)
             sensitivities.append(sensitivity)
             specificities.append(specificity)
-
             # do the same for other thresholds
-
+            # 70
             core_flat = np.where(hemisphere_mask == 0, np.nan, pred70_flat)
             tp = len(np.where((gt_flat == 1) & (core_flat == 1))[0])
             fp = len(np.where((gt_flat == 0) & (core_flat == 1))[0])
@@ -746,11 +746,6 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
             auc_score70 = auc(fpr, tpr)
             # 90
             core_flat = np.where(hemisphere_mask == 0, np.nan, pred90_flat)
-            num_positive = len(np.where((gt_flat == 1))[0])
-            num_positive_predicted = len(np.where((core_flat == 1))[0])
-            num_negative = len(np.where((gt_flat == 0))[0])
-            num_negative_predicted = len(np.where((core_flat == 0))[0])
-
             tp = len(np.where((gt_flat == 1) & (core_flat == 1))[0])
             fp = len(np.where((gt_flat == 0) & (core_flat == 1))[0])
             fn = len(np.where((gt_flat == 1) & (core_flat == 0))[0])
@@ -780,20 +775,18 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
             size_pred = prediction.sum()
             size_pred_ml = size_pred * pixel_vol / 1000
 
+            # For png images, optional
             try:
-                dwi_img = glob.glob(os.path.join(data_dir, 'dwi_test/', subject + '*'))[0]
+                dwi_img = [file for file in dwi_paths if name in file][0]
                 dwi_img = loader(dwi_img)
-                # spartan giving an error
+                # below was necessary on spartan
                 dwi_img = dwi_img.detach().numpy()
-
-                save_loc = png_dir + '/' + subject + '_proba.png'
-                numbers = [num_positive, num_positive_predicted, num_negative, num_negative_predicted, tp, tn, fp, fn,
-                           sensitivity90]
-                # create_dwi_ctp_proba_map(dwi_img, ground_truth, prediction, prediction_70, prediction_90, save_loc,
-                #                          define_zvalues(dwi_img), numbers=numbers, ext='png', save=True)
+                save_loc = png_dir + '/' + name + '_proba.png'
+                create_dwi_ctp_proba_map(dwi_img, ground_truth, prediction, prediction_70, prediction_90, save_loc,
+                                         define_zvalues(dwi_img), ext='png', save=True)
             except IndexError:
-                print("no_dwi_image")
-
+                print("no_dwi_image, not generating png")
+            # populate the results dataframe
             results.loc[results.id == name, 'size'] = size
             results.loc[results.id == name, 'size_ml'] = size_ml
             results.loc[results.id == name, 'size_pred'] = size_pred
@@ -816,7 +809,6 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
             results.loc[results.id == name, 'npv'] = npv
             results.loc[results.id == name, 'npv70'] = npv70
             results.loc[results.id == name, 'npv90'] = npv90
-
         # aggregate the final mean dice result
         metric = np.mean(dice_metric)
         metric70 = np.mean(dice_metric70)
@@ -824,29 +816,23 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
         metric_recall = np.mean(sensitivities)
         metric_specificity = np.mean(specificities)
         metric_auc = np.mean(auc_score)
-        # reset the status for next validation round
     print(f"Mean dice on test set: {metric:.4f}")
+    # populate results dataframe with mean values
     results['mean_dice'] = metric
     results['mean_dice_70'] = metric70
     results['mean_dice_90'] = metric90
     results['mean_sensitvity'] = metric_recall
     results['mean_specificity'] = metric_specificity
     results['mean_auc'] = metric_auc
-    results_join = results.join(
-        df[~df.index.duplicated(keep='first')],
-        on='id',
-        how='left')
-    results_join.to_csv(
-        data_dir + 'out_' + out_tag + '/results_' + str(
-            max_epochs) + '_epoch_' + model_name + '_' + loss_name + '_' + features_string + '.csv', index=False)
 
+    results.to_csv(
+        os.path.join(data_dir, 'out_' + out_tag, 'results_' + str(
+            max_epochs) + '_epoch_' + model_name + '_' + loss_name + '_' + features_string + '.csv'), index=False)
+    df.to_csv(
+        os.path.join(data_dir, 'out_' + out_tag, 'train_test_split.csv'), index=False
+    )
+    # MAKE AUC CURVE (only three points for binary output data)
     fpr, tpr, threshold = roc_curve(gts_flat, preds_flat)
-    roc_df = pd.DataFrame(np.asarray([gts_flat, preds_flat]).transpose(), columns=['ground_truth', 'prediction'],
-                          index=pixel_ids)
-    roc_df.to_csv(
-        data_dir + 'out_' + out_tag + '/roc_data_' + str(
-            max_epochs) + '_epoch_' + model_name + '_' + loss_name + '_' + features_string + '.csv', index=False)
-    #
     roc_auc = auc(fpr, tpr)
     plt.title('Receiver Operating Characteristic')
     plt.plot(fpr, tpr, 'b', label='AUC = %0.2f' % roc_auc)
@@ -864,10 +850,7 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
 
 
 if __name__ == "__main__":
-    # Environment variables which need to be
-    # set when using c10d's default "env"
-    # initialization mode.
-
-    # FEATURES SHOULD BE LISTED IN THIS ORDER = ['DT', 'CBF', 'CBV', 'MTT', 'ncct']
-
-    main(*sys.argv[1:])
+    if len(sys.argv) < 2:
+        print('Must specify location of data.')
+    else:
+        main(*sys.argv[1:])
