@@ -1,10 +1,8 @@
 import random
 import sys
 from fns import *
-
 sys.path.append('../DenseNetFCN3D-pytorch')
 from densenet import *
-
 from monai.data import CacheDataset, DataLoader, decollate_batch
 from monai.losses import DiceCELoss
 from torch.optim import Adam
@@ -36,7 +34,6 @@ from monai.transforms import (
     ThresholdIntensityd,
     SplitDimd,
 )
-
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -87,7 +84,7 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
     image_paths.sort()
     mask_paths = glob.glob(os.path.join(data_dir, 'masks', '*'))
     mask_paths.sort()
-    ncct_paths = glob.glob(os.path.join(data_dir, 'ncct', '*'))
+    ncct_paths = glob.glob(os.path.join(data_dir, 'nccts', '*'))
     ncct_paths.sort()
     # below is only for creating results images after, optional
     dwi_paths = glob.glob(os.path.join(data_dir, 'dwi', '*'))

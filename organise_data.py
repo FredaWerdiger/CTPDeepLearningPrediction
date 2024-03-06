@@ -1,0 +1,208 @@
+"""
+Arranging data from ATLAS database for deep learning
+Data has already been quality checked
+CTP maps need to be stacked into a multi-channel feature map, and places into
+DWI lesion (coregistered to CTP) needs to be recast as ground truth
+"""
+import os
+import pandas as pd
+from random import seed, sample
+import shutil
+import nibabel as nb
+import numpy as np
+import glob
+import SimpleITK as sitk
+from scipy.ndimage import morphology
+from nipype.interfaces.image import Reorient
+import time
+import sys
+# https://github.com/FredaWerdiger/automatic_rotation
+path_to_hemisphere_masking = '../automatic_rotation' # change if needed
+sys.path.append(path_to_hemisphere_masking)
+import infer
+
+
+'''
+Arguments:
+subject_file:
+subject file input is expected to be comma separated values file of INSPIRE subject names
+created like
+with open('test_file.csv', 'w') as myfile:
+    writer = csv.writer(myfile)
+    for subject in subs:
+        writer.writerow([subject])
+atlas_path:
+The location of the mediaflux drive (e.g. Y:)
+out_path:
+the location of the result. Within the specified path, the stacked images will be saved under 'images'
+'''
+
+
+def main(subjects_file, atlas_path, mediaflux_path, out_path, overwrite=False):
+
+    subjects_file = '../dwi_inference/test_file.csv'
+    atlas_path = 'Y:/'
+    mediaflux_path = 'X:/'
+    out_path = 'X:/data_freda/ctp_project/CTP_DL_Data/no_reperfusion/'
+    # +++++++++++++++++++++++++
+    # CREATE OUTPUT DIRECTORIES
+    # +++++++++++++++++++++++++
+
+    if not os.path.exists(out_path):
+        os.makedirs(out_path)
+    sub_folder = os.path.join(out_path, 'DATA')
+    if not os.path.exists(sub_folder):
+        os.makedirs(sub_folder)
+    images_out = os.path.join(sub_folder, 'images')
+    masks_out = os.path.join(sub_folder, 'masks')
+    nccts_out = os.path.join(sub_folder, 'nccts')
+    dwis_out = os.path.join(sub_folder, 'dwis')
+    right_mask_out = os.path.join(sub_folder, 'right_hemisphere_mask')
+    left_mask_out = os.path.join(sub_folder, 'left_hemisphere_mask')
+
+    if not os.path.exists(images_out):
+        os.makedirs(images_out)
+    if not os.path.exists(masks_out):
+        os.makedirs(masks_out)
+    if not os.path.exists(nccts_out):
+        os.makedirs(nccts_out)
+    if not os.path.exists(dwis_out):
+        os.makedirs(dwis_out)
+    if not os.path.exists(right_mask_out):
+        os.makedirs(right_mask_out)
+    if not os.path.exists(left_mask_out):
+        os.makedirs(left_mask_out)
+
+    atlas = os.path.join(atlas_path, 'ATLAS_database')
+    subjects_df = pd.read_csv(
+        subjects_file,
+        sep=',',
+        header=None,
+        names=['subject']).sort_values(by='subject').reset_index(drop=True)
+    subjects_df['dl_id'] = [str(num).zfill(3) for num in range(len(subjects_df))]
+
+    subjects = subjects_df.subject.to_list()
+
+    subjects_df['error'] = '' # somewhere to jot down errors
+
+    for id, subject in enumerate(subjects):
+        id = str(id).zfill(3)
+        print(f"Running for subject: {subject}", f"id:{id}")
+        if os.path.exists(
+                os.path.join(sub_folder, 'masks', 'mask_' + id + '.nii.gz')) and os.path.exists(
+            os.path.join(sub_folder, 'images', 'image_' + id + '.nii.gz')):
+            print("Already exists.")
+            if not overwrite:
+                continue
+            else:
+                print("Overwriting.")
+
+        mistar_folder = os.path.join(atlas, subject + '/CT_baseline/CTP_baseline/mistar/')
+        gt_folder = os.path.join(atlas, subject + '/CT_baseline/CTP_baseline/transform-DWI_followup/')
+        dt = mistar_folder + subject + '-baseline-CTP_Delay_Time.nii.gz'
+        cbf = mistar_folder + subject + '-baseline-CTP_CBF.nii.gz'
+        cbv = mistar_folder + subject + '-baseline-CTP_CBV.nii.gz'
+        mtt = mistar_folder + subject + '-baseline-CTP_MTT.nii.gz'
+        dt, cbf, cbv, mtt = [nb.load(path) for path in [dt, cbf, cbv, mtt]]
+        # find the orientation of these images
+        ctp_or = nb.aff2axcodes(dt.affine)
+        # stack the four images and save
+        feature_image = nb.concat_images([dt, cbf, cbv, mtt])
+        nb.save(feature_image,
+                images_out + '/image_' + id + '.nii.gz')
+
+        gt = gt_folder + subject + '-space-CTP-label-DWI_manual_lesion.nii.gz'
+        dwi = gt_folder + subject + '-space-CTP-DWI_b1000.nii'
+
+        if not os.path.exists(gt):
+            # look into mediaflux files
+            try:
+                gt = [file for file in
+                      glob.glob(os.path.join(mediaflux_path, 'data_freda/ctp_project/CTP_DL_Data/no_seg'
+                                                             '/masks_semi_ctp/*'))
+                      if subject in file][0]
+                dwi = os.path.join(mediaflux_path,
+                                   'data_freda/ctp_project/CTP_DL_Data/no_seg'
+                                   '/dwi_ctp/' + subject + '_dwi_ctp.nii.gz')
+            except IndexError:
+                try:
+                    gt = [file for file in
+                          glob.glob(os.path.join(mediaflux_path, 'data_freda/ctp_project/CTP_DL_Data/no_seg'
+                                                                 '/masks_semi_ctp_june/*'))
+                          if subject in file][0]
+                    dwi = os.path.join(mediaflux_path,
+                                       'data_freda/ctp_project/CTP_DL_Data/no_seg'
+                                       '/dwi_ctp_june/' + subject + '_dwi_ctp.nii.gz')
+                except IndexError:
+                    try:
+                        gt = [file for file in
+                              glob.glob(os.path.join(mediaflux_path,
+                                                     'data_freda/ctp_project/CTP_DL_Data/no_reperfusion/dwi_inference'
+                                                     '/segs_ctp/*'))
+                              if subject in file][0]
+                        dwi = os.path.join(mediaflux_path,
+                                                     'data_freda/ctp_project/CTP_DL_Data/no_reperfusion/dwi_inference'
+                                                     '/dwi_ctp/' + subject + '_dwi_ctp.nii.gz')
+                    except IndexError:
+                        # TODO: add options for ncct follow ups!
+                        print('Could not find a ground truth for {}.'.format(subject))
+                        subjects_df[subjects_df.subject == subject, 'error'] = 'no gt'
+                        continue
+
+        # ensure orientation is the same as ctp
+        dwi_im = nb.load(dwi)
+        dwi_or = nb.aff2axcodes(dwi_im.affine)
+        if not dwi_or == ctp_or:
+            print('CTP and GT are not orientated the same direction')
+            reorient_to = ctp_or[0] + ctp_or[1] + ctp_or[2]
+            print('Reorienting GT to the same orientation as CTP')
+            reorient = Reorient(orientation=reorient_to)
+            reorient.inputs.in_file = dwi
+            res = reorient.run()
+            time.sleep(3)
+            shutil.copyfile(res.outputs.out_file, dwis_out + '/dwi_' + id + '.nii.gz')
+            os.remove(res.outputs.out_file)
+            reorient.inputs.in_file = gt
+            res = reorient.run()
+            time.sleep(3)
+            shutil.copyfile(res.outputs.out_file, masks_out + '/mask_' + id + '.nii.gz')
+            os.remove(res.outputs.out_file)
+        else:
+            shutil.copyfile(gt, masks_out +  '/mask_' + id + '.nii.gz')
+            shutil.copyfile(dwi, dwis_out +  '/dwi_' + id + '.nii.gz')
+
+        ncct_folder = mistar_folder + 'Mean_baseline/'
+
+        if ("AU05" not in subject) and ("CN23" not in subject) and ("CN03" not in subject):
+            try:
+                ncct_brain = glob.glob(ncct_folder + '*baseline-mistar_brain.nii.gz')[0]
+                shutil.copyfile(ncct_brain, nccts_out + '/ncct_' + id + '.nii.gz')
+            except IndexError:
+                try:
+                    ncct_brain = glob.glob(ncct_folder + '*baseline_brain.nii.gz')[0]
+                    shutil.copyfile(ncct_brain, nccts_out + '/ncct_' + id + '.nii.gz')
+                except IndexError:
+                    print('No skull stripped NCCT.')
+                    subjects_df[subjects_df.subject == subject, 'error'] = 'no brain image'
+                    continue
+        else:
+            try:
+                ncct_brain = glob.glob(ncct_folder + '*baseline_brain.nii.gz')[0]
+                shutil.copyfile(ncct_brain, nccts_out + '/ncct_' + id + '.nii.gz')
+            except IndexError:
+                print('No skull stripped NCCT.')
+                subjects_df[subjects_df.subject == subject, 'error'] = 'no brain image'
+                continue
+
+        # generate the hemipshere masks
+        infer.main(ncct_brain, left_mask_out + '/left_mask_' + id + '.nii.gz', 'left', path_to_hemisphere_masking)
+        infer.main(ncct_brain, left_mask_out + '/right_mask_' + id + '.nii.gz', 'right', path_to_hemisphere_masking)
+
+    subjects_df.to_csv(os.path.join(out_path, 'subject_ids.csv'))
+
+
+
+
+
+
+
