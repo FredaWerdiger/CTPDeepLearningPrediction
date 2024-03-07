@@ -60,12 +60,15 @@ e.g. ['DT', 'NCCT'] or ['CBF', 'MTT', 'NCCT']
 
 out_tag = tag for the folder that will hold results. If left empty (out_tag='') the folder will be called "out"
 
+test_cases = ''
+a csv file with a list of cases that are denoted as test cases
+
 notes = anything you want to add to the results print out.
 
 '''
 
 
-def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, notes=''):
+def main(data_dir, out_tag='', test_cases=None, features=None, image_size=None, max_epochs=None, notes=''):
 
     # ++++++++++++++++++++++
     # SET DEFAULT PARAMETERS
@@ -109,6 +112,16 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
     df['mask_paths'] = mask_paths
     df['dwi_paths'] = dwi_paths
 
+    # +++++++++++++++
+    # READ TEST CASES
+    # +++++++++++++++
+    if test_cases:
+        extra_test_id = pd.read_csv(
+            test_cases,
+            sep=',',
+            header=None,
+            names=['dl_id']).dl_id.to_list()
+        dl_id = [name for name in dl_id if name not in extra_test_id]
     # +++++++++++++++++++++++
     # STRATIFY BY LESION SIZE
     # +++++++++++++++++++++++
@@ -150,6 +163,8 @@ def main(data_dir, out_tag='', features=None, image_size=None, max_epochs=None, 
                                               shuffle=True,
                                               stratify=test_labels)
 
+    if test_cases:
+        test_id = test_id + extra_test_id
     # GET THE NUMBER OF SMALL LESIONS IN EACH GROUP
     # LABEL IDS
     df['group'] = ''
