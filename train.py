@@ -90,7 +90,7 @@ def main(data_dir, out_tag='', test_cases=None, features=None, image_size=None, 
     ncct_paths = glob.glob(os.path.join(data_dir, 'nccts', '*'))
     ncct_paths.sort()
     # below is only for creating results images after, optional
-    dwi_paths = glob.glob(os.path.join(data_dir, 'dwi', '*'))
+    dwi_paths = glob.glob(os.path.join(data_dir, 'dwis', '*'))
     dwi_paths.sort()
     # below are used to get results from one hemisphere
     # these are generated using https://github.com/FredaWerdiger/automatic_rotation
@@ -121,6 +121,7 @@ def main(data_dir, out_tag='', test_cases=None, features=None, image_size=None, 
             sep=',',
             header=None,
             names=['dl_id']).dl_id.to_list()
+        extra_test_id = [str(name).zfill(len(dl_id[-1])) for name in extra_test_id]
         dl_id = [name for name in dl_id if name not in extra_test_id]
     # +++++++++++++++++++++++
     # STRATIFY BY LESION SIZE
@@ -140,6 +141,7 @@ def main(data_dir, out_tag='', test_cases=None, features=None, image_size=None, 
     # SMALL LESIONS DEFINED AS LESS THAN 5ML
     labels = (np.asarray(lesion_size) < 5) * 1
     df['size_labels'] = labels
+    labels = df[df.apply(lambda x: x.dl_id in dl_id, axis=1)].size_labels.to_list()
 
     num_train = int(np.ceil(0.6 * len(labels)))
     num_validation = int(np.ceil(0.2 * len(labels)))
