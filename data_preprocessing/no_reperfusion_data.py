@@ -471,7 +471,6 @@ df_no_reperfusion.sort_values(by=['include_checked', 'note', 'subject'], ascendi
 # Below are the "cautious" patients to be place in the test set
 test_subjects = [
     'INSP_CN030064',
-    'INSP_CN030064',
     'INSP_AU010040',
     'INSP_AU010592',
     'INSP_AU010622',
@@ -489,5 +488,5 @@ test_subjects = [
 df_no_reperfusion['test_cases'] = ''
 
 for subject in test_subjects:
-    df_no_reperfusion.loc[df_no_reperfusion.subject == 'INSP_AU010747', 'test_cases'] = 1
+    df_no_reperfusion.loc[df_no_reperfusion.subject == subject, 'test_cases'] = 1
 df_no_reperfusion.to_csv('./study_lists/no_reperfusion_all.csv', index=False)
