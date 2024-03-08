@@ -16,7 +16,7 @@ if not os.path.exists(atlas):
     atlas = 'Y:/'
     mediaflux = 'X:/'
 
-no_reperfusion= pd.read_csv('../../study_design/study_lists/no_reperfusion_all.csv')
+no_reperfusion= pd.read_csv(mediaflux + '/data_freda/ctp_project/CTP_DL_Data/no_reperfusion/no_reperfusion_all.csv')
 
 nccts = no_reperfusion[no_reperfusion.apply(lambda x: (x.note == 'follow_up_ncct') and (x.slab != 1.0), axis=1)]
 out_dir = os.path.join(mediaflux, 'data_freda', 'ncct_segmentation', 'inference')
