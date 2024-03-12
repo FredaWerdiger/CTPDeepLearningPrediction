@@ -50,3 +50,7 @@ python train.py data_dir out_tag test_cases features image_size max_epochs notes
 This contains all the codes used in the preprocessing of the data. These are included so that data selection can be reproduced. 
   
 
+## Dependencies
+- MONAI version: 0.10.dev2237
+- Numpy version: 1.21.2
+- Pytorch version: 1.10.2
